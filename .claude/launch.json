@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hermes-v2-dev",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5219", "--host", "127.0.0.1"],
+      "port": 5219
+    }
+  ]
+}

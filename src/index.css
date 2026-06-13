@@ -1,0 +1,54 @@
+:root {
+  font-family:
+    Inter, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #475467;
+  background: #eef1f7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.75), transparent 40%),
+    linear-gradient(180deg, #f7f8fc 0%, #edf0f7 100%);
+}
+
+body,
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button,
+textarea {
+  outline: none;
+}
+
+button:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(78, 139, 255, 0.5);
+  outline-offset: 2px;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
