@@ -4,9 +4,11 @@ import { getJobs } from '../services/hermes'
 
 export function JobList({
   nodes,
+  onOpenChat,
   onClose,
 }: {
   nodes: { id: HermesInstanceId; name: string; accent: string }[]
+  onOpenChat: (instanceId: HermesInstanceId) => void
   onClose: () => void
 }) {
   const [activeNode, setActiveNode] = useState<string>(nodes[0]?.id ?? '')
@@ -89,9 +91,14 @@ export function JobList({
         <header className="panel-sheet__header">
           <h2>自动任务</h2>
           <p>各 Hermes 节点的定时任务与 Cron 作业</p>
-          <button type="button" className="panel-sheet__close" onClick={onClose}>
-            ×
-          </button>
+          <div className="dialog-header-actions">
+            <button type="button" className="dialog-chat-btn" onClick={() => onOpenChat(activeNode)} title="打开对话">
+              💬
+            </button>
+            <button type="button" className="panel-sheet__close" onClick={onClose}>
+              ×
+            </button>
+          </div>
         </header>
 
         <nav className="panel-sheet__tabs">

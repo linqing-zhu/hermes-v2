@@ -72,9 +72,14 @@ export function DispatchModal({
               {node.name} · {agent.model || '默认模型'}
             </p>
           </div>
-          <button type="button" className="dispatch__close" onClick={onClose}>
-            ×
-          </button>
+          <div className="dialog-header-actions">
+            <button type="button" className="dialog-chat-btn" onClick={onChat} title="打开对话">
+              💬
+            </button>
+            <button type="button" className="dispatch__close" onClick={onClose}>
+              ×
+            </button>
+          </div>
         </header>
 
         <div className="dispatch__seg" role="tablist">

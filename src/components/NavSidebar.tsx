@@ -1,29 +1,34 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { navGroups, type HermesNode } from '../data/cyber'
-import type { HermesInstanceId } from '../services/hermes'
+import {
+  getObsidianNote,
+  getObsidianNotes,
+  type HermesInstanceId,
+  type ObsidianNoteContent,
+  type ObsidianNoteItem,
+} from '../services/hermes'
 import {
   MessageCirclePlus,
-  Clock,
   Puzzle,
-  Package,
   FileText,
-  Image,
-  Monitor,
+  RefreshCw,
+  Search,
   Settings,
+  ChevronRight,
+  Folder,
 } from 'lucide-react'
 
 const ICON_MAP: Record<string, typeof MessageCirclePlus> = {
   'message-circle-plus': MessageCirclePlus,
-  'clock': Clock,
   'puzzle': Puzzle,
-  'package': Package,
   'file-text': FileText,
-  'image': Image,
-  'monitor': Monitor,
 }
 const ICON_SIZE = 16
 
 const USERNAME_KEY = 'cyber:username'
+const OBSIDIAN_ROOT_KEY = 'cyber:obsidian-root'
 
 function loadUsername() {
   try {
@@ -46,6 +51,7 @@ export type NavSidebarProps = {
   onUpdateNode: (id: HermesInstanceId, draft: Partial<AddNodeDraft>) => void
   onRemoveNode: (id: string) => void
   onTestNode: (host: string, apiKey?: string, sessionKey?: string) => Promise<{ ok: boolean; message: string }>
+  onRefreshNodes: () => Promise<void>
 }
 
 type AddNodeDraft = {
@@ -83,6 +89,231 @@ function PromptCard({ label, text }: { label: string; text: string }) {
   )
 }
 
+function loadObsidianRoot() {
+  try {
+    return localStorage.getItem(OBSIDIAN_ROOT_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+// --- Obsidian note tree --------------------------------------------------
+type ObsidianTreeNode = {
+  name: string
+  /** Folder path (joined with '/') for keying/expansion; files use note.relativePath. */
+  path: string
+  note?: ObsidianNoteItem
+  children: ObsidianTreeNode[]
+}
+
+/** Build a folder tree from notes' relativePaths (split on / or \). */
+function buildNoteTree(notes: ObsidianNoteItem[]): ObsidianTreeNode[] {
+  const root: ObsidianTreeNode = { name: '', path: '', children: [] }
+  for (const note of notes) {
+    const parts = note.relativePath.split(/[\\/]/).filter(Boolean)
+    let cur = root
+    parts.forEach((seg, i) => {
+      const isLeaf = i === parts.length - 1
+      const segPath = parts.slice(0, i + 1).join('/')
+      let child = cur.children.find((c) =>
+        isLeaf ? c.note?.relativePath === note.relativePath : !c.note && c.name === seg,
+      )
+      if (!child) {
+        child = { name: seg, path: segPath, children: [], note: isLeaf ? note : undefined }
+        cur.children.push(child)
+      }
+      cur = child
+    })
+  }
+  // folders first, then files; alphabetical within each group.
+  const sortRec = (n: ObsidianTreeNode) => {
+    n.children.sort((a, b) => {
+      const af = a.note ? 1 : 0
+      const bf = b.note ? 1 : 0
+      if (af !== bf) return af - bf
+      return a.name.localeCompare(b.name, 'zh-CN')
+    })
+    n.children.forEach(sortRec)
+  }
+  sortRec(root)
+  return root.children
+}
+
+function ObsidianPanel({ onClose }: { onClose: () => void }) {
+  const [root, setRoot] = useState(loadObsidianRoot)
+  const [notes, setNotes] = useState<ObsidianNoteItem[]>([])
+  const [selectedPath, setSelectedPath] = useState('')
+  const [activeNote, setActiveNote] = useState<ObsidianNoteContent | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [opening, setOpening] = useState(false)
+  const [error, setError] = useState('')
+  const [truncated, setTruncated] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const tree = useMemo(() => buildNoteTree(notes), [notes])
+  const toggleFolder = (path: string) =>
+    setExpanded((cur) => {
+      const next = new Set(cur)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+
+  const refresh = async () => {
+    const trimmed = root.trim()
+    if (!trimmed) {
+      setError('先输入 Obsidian vault 目录')
+      return
+    }
+    setLoading(true)
+    setError('')
+    try {
+      localStorage.setItem(OBSIDIAN_ROOT_KEY, trimmed)
+      const data = await getObsidianNotes(trimmed)
+      setRoot(data.root)
+      setNotes(data.notes)
+      setTruncated(data.truncated)
+      if (data.notes.length) {
+        void openNote(data.notes[0])
+      } else {
+        setSelectedPath('')
+        setActiveNote(null)
+      }
+    } catch (err) {
+      setNotes([])
+      setTruncated(false)
+      setError(err instanceof Error ? err.message : '读取笔记失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const openNote = async (note: ObsidianNoteItem) => {
+    setSelectedPath(note.relativePath)
+    // expand ancestor folders so the opened note is visible in the tree
+    const parts = note.relativePath.split(/[\\/]/).filter(Boolean)
+    if (parts.length > 1) {
+      setExpanded((cur) => {
+        const next = new Set(cur)
+        for (let i = 1; i < parts.length; i++) next.add(parts.slice(0, i).join('/'))
+        return next
+      })
+    }
+    setOpening(true)
+    setError('')
+    try {
+      const data = await getObsidianNote(root.trim(), note.relativePath)
+      setActiveNote(data)
+    } catch (err) {
+      setActiveNote(null)
+      setError(err instanceof Error ? err.message : '打开笔记失败')
+    } finally {
+      setOpening(false)
+    }
+  }
+
+  useEffect(() => {
+    if (root.trim()) void refresh()
+    // Run once when the panel opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const renderNodes = (nodes: ObsidianTreeNode[], depth: number): ReactNode =>
+    nodes.map((node) => {
+      if (node.note) {
+        const note = node.note
+        return (
+          <button
+            key={note.path}
+            type="button"
+            className={`knowledge-tree__file ${selectedPath === note.relativePath ? 'is-active' : ''}`}
+            style={{ ['--depth' as string]: depth }}
+            onClick={() => void openNote(note)}
+            title={note.title}
+          >
+            <FileText size={13} className="knowledge-tree__icon" />
+            <span className="knowledge-tree__label">{note.title}</span>
+          </button>
+        )
+      }
+      const open = expanded.has(node.path)
+      return (
+        <div key={`dir:${node.path}`} className="knowledge-tree__group">
+          <button
+            type="button"
+            className="knowledge-tree__folder"
+            style={{ ['--depth' as string]: depth }}
+            onClick={() => toggleFolder(node.path)}
+          >
+            <ChevronRight size={13} className={`knowledge-tree__chevron ${open ? 'is-open' : ''}`} />
+            <Folder size={13} className="knowledge-tree__icon" />
+            <span className="knowledge-tree__label">{node.name}</span>
+          </button>
+          {open ? renderNodes(node.children, depth + 1) : null}
+        </div>
+      )
+    })
+
+  return (
+    <div className="settings__backdrop" onClick={onClose}>
+      <div className="knowledge-panel" onClick={(e) => e.stopPropagation()}>
+        <header className="knowledge-panel__header">
+          <div>
+            <h2>Obsidian 文档</h2>
+            <p>输入 vault 目录后读取本机 Markdown 笔记。</p>
+          </div>
+          <button type="button" className="settings__close" onClick={onClose}>×</button>
+        </header>
+
+        <div className="knowledge-panel__toolbar">
+          <input
+            value={root}
+            onChange={(e) => setRoot(e.target.value)}
+            placeholder="例如 C:\Users\你\Documents\Obsidian\我的库"
+          />
+          <button type="button" className="config-btn knowledge-panel__refresh" onClick={() => void refresh()} disabled={loading}>
+            <RefreshCw size={14} />
+            {loading ? '刷新中' : '刷新'}
+          </button>
+        </div>
+
+        {error ? <p className="knowledge-panel__error">{error}</p> : null}
+        {truncated ? <p className="knowledge-panel__notice">笔记较多，已显示最近 300 条。</p> : null}
+
+        <div className="knowledge-panel__workspace">
+          <aside className="knowledge-tree">
+            {notes.length ? (
+              renderNodes(tree, 0)
+            ) : (
+              <div className="knowledge-panel__empty">
+                {loading ? '正在读取笔记...' : '输入 Obsidian 目录后点击刷新。'}
+              </div>
+            )}
+          </aside>
+
+          <main className="knowledge-reader">
+            {opening ? (
+              <div className="knowledge-panel__empty">正在打开笔记...</div>
+            ) : activeNote ? (
+              <>
+                <header className="knowledge-reader__head">
+                  <h3>{activeNote.title}</h3>
+                  <span>{activeNote.relativePath}</span>
+                </header>
+                <article className="knowledge-reader__markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{activeNote.content}</ReactMarkdown>
+                </article>
+              </>
+            ) : (
+              <div className="knowledge-panel__empty">从左侧选择一篇 Markdown 笔记。</div>
+            )}
+          </main>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /**
  * Collapsed icon rail that expands on hover. All nav items have real click
  * handlers. Recent sessions live in the left-hand ChatPanel, not here.
@@ -94,9 +325,11 @@ export function NavSidebar({
   onUpdateNode,
   onRemoveNode,
   onTestNode,
+  onRefreshNodes,
 }: NavSidebarProps) {
   const [username, setUsername] = useState(loadUsername)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [obsidianOpen, setObsidianOpen] = useState(false)
   const [draftName, setDraftName] = useState(username)
 
   // add-node form
@@ -172,6 +405,9 @@ export function NavSidebar({
     try {
       const res = await onTestNode(host, apiKey, sessionKey)
       setTestResult(res)
+      if (res.ok) {
+        await onRefreshNodes()
+      }
     } catch (err) {
       setTestResult({ ok: false, message: err instanceof Error ? err.message : '检测失败' })
     } finally {
@@ -198,50 +434,60 @@ export function NavSidebar({
         </div>
 
         <label className="nav-search">
-          <span className="nav-item__icon" />
+          <span className="nav-item__icon nav-item__icon--search">
+            <Search size={ICON_SIZE} strokeWidth={1.8} />
+          </span>
           <input className="nav-label" placeholder="搜索" disabled />
         </label>
 
         <nav className="nav-groups">
-          {navGroups.map((group, index) => (
+          {navGroups.map((group, index) => {
+            const items = group.items.filter((item) => !['auto-task', 'apps', 'gallery', 'pc'].includes(item.id))
+            if (!items.length) return null
+            const groupTitle = items.some((item) => item.id === 'docs') ? '本地知识库' : group.title
+            return (
             <div key={group.title ?? index} className="nav-group">
-              {group.title ? <p className="nav-group__title nav-label">{group.title}</p> : null}
-              {group.items.map((item) => (
+              {groupTitle ? <p className="nav-group__title nav-label">{groupTitle}</p> : null}
+              {items.map((item) => (
                 <button
                   key={item.id}
                   type="button"
-                  className={`nav-item ${item.comingSoon ? 'is-disabled' : ''}`}
-                  title={item.tooltip ?? item.label}
+                  className={`nav-item ${item.comingSoon && item.id !== 'docs' ? 'is-disabled' : ''}`}
+                  title={item.id === 'docs' ? '打开 Obsidian 笔记' : item.tooltip ?? item.label}
                   onClick={() => {
+                    if (item.id === 'docs') {
+                      setObsidianOpen(true)
+                      return
+                    }
                     if (item.comingSoon) return
                     if (item.id === 'new-chat') onAction({ type: 'new-chat' })
                     if (item.id === 'skills') onAction({ type: 'skill-gallery' })
                     if (item.id === 'auto-task') onAction({ type: 'job-list' })
                   }}
                 >
-                  <span className="nav-item__icon">
+                  <span className={`nav-item__icon nav-item__icon--${item.id}`}>
                     {(() => {
                       const Icon = ICON_MAP[item.icon]
-                      return Icon ? <Icon size={ICON_SIZE} strokeWidth={1.5} /> : item.icon
+                      return Icon ? <Icon size={ICON_SIZE} strokeWidth={1.8} /> : item.icon
                     })()}
                   </span>
                   <span className="nav-label">
-                    {item.label}
-                    {item.comingSoon ? (
+                    {item.id === 'docs' ? '文档' : item.label}
+                    {item.comingSoon && item.id !== 'docs' ? (
                       <em className="nav-label__soon">即将上线</em>
                     ) : null}
                   </span>
                 </button>
               ))}
             </div>
-          ))}
+          )})}
 
         </nav>
 
         <div className="nav-rail__foot">
           <button type="button" className="nav-item" onClick={openSettings}>
-            <span className="nav-item__icon nav-item__icon--gear">
-              <Settings size={16} strokeWidth={1.5} />
+            <span className="nav-item__icon nav-item__icon--settings">
+              <Settings size={16} strokeWidth={1.8} />
             </span>
             <span className="nav-label">配置</span>
           </button>
@@ -280,14 +526,18 @@ export function NavSidebar({
         </div>
       ) : null}
 
+      {obsidianOpen ? <ObsidianPanel onClose={() => setObsidianOpen(false)} /> : null}
+
       {settingsOpen ? (
         <div className="settings__backdrop" onClick={() => setSettingsOpen(false)}>
           <div className="settings" onClick={(e) => e.stopPropagation()}>
             <header className="settings__header">
               <h2>配置</h2>
-              <button type="button" className="settings__close" onClick={() => setSettingsOpen(false)}>
-                ×
-              </button>
+              <div className="dialog-header-actions">
+                <button type="button" className="settings__close" onClick={() => setSettingsOpen(false)}>
+                  ×
+                </button>
+              </div>
             </header>
 
             <label className="settings__field">
@@ -316,36 +566,6 @@ export function NavSidebar({
                     <li key={node.id} className="settings__node">
                       <i className="settings__node-dot" style={{ background: node.accent }} />
                       {isEditing ? (
-                        node.kind === 'local' ? (
-                          <div className="settings__node-edit">
-                            <input
-                              value={editName}
-                              onChange={(e) => setEditName(e.target.value)}
-                              placeholder="名称"
-                              autoFocus
-                            />
-                            <div className="settings__node-actions">
-                              <button
-                                type="button"
-                                className="config-btn config-btn--ghost"
-                                onClick={() => setEditingNodeId(null)}
-                              >
-                                取消
-                              </button>
-                              <button
-                                type="button"
-                                className="config-btn"
-                                disabled={!editName.trim()}
-                                onClick={() => {
-                                  onUpdateNode(node.id, { name: editName.trim() || node.name })
-                                  setEditingNodeId(null)
-                                }}
-                              >
-                                保存
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
                         <div className="settings__node-edit">
                           <input
                             value={editName}
@@ -421,23 +641,22 @@ export function NavSidebar({
                             </div>
                           ) : null}
                         </div>
-                        )
                       ) : (
                         <span className="settings__node-meta">
                           <strong>{node.name}</strong>
                           <em>
-                            {node.kind === 'local' ? '本机 · 自动识别' : `${node.system} · ${node.host}`}
+                            {node.kind === 'local' ? `本机 · ${node.system} · ${node.host}` : `${node.system} · ${node.host}`}
                             {node.kind === 'remote' && node.sshAlias ? ` · SSH:${node.sshAlias}` : ''}
                             {node.kind === 'remote' && !node.sshAlias ? ' · 无SSH(仅对话/状态)' : ''}
                           </em>
                         </span>
                       )}
-                      {node.kind === 'remote' && !isEditing ? (
+                      {!isEditing ? (
                         <div className="settings__node-btns">
                           <button
                             type="button"
                             className="settings__node-edit-btn"
-                            title="编辑节点配置"
+                            title={node.kind === 'local' ? '编辑本机 IP / 端口 / API Key' : '编辑节点配置'}
                             onClick={() => {
                               setEditName(node.name)
                               setEditHost(node.host)
@@ -448,29 +667,18 @@ export function NavSidebar({
                               setEditingNodeId(node.id)
                             }}
                           >
-                            ✎
+                            {node.kind === 'local' ? '✎ 编辑连接' : '✎'}
                           </button>
-                          <button
-                            type="button"
-                            className="settings__node-del"
-                            onClick={() => setDeleteTarget({ id: node.id, name: node.name })}
-                          >
-                            删除
-                          </button>
-                        </div>
-                      ) : node.kind === 'local' ? (
-                        <div className="settings__node-btns">
-                          <button
-                            type="button"
-                            className="settings__node-edit-btn"
-                            title="重命名本机"
-                            onClick={() => {
-                              setEditName(node.name)
-                              setEditingNodeId(node.id)
-                            }}
-                          >
-                            ✎ 编辑
-                          </button>
+                          {node.kind === 'remote' ? (
+                            <button
+                              type="button"
+                              className="settings__node-del"
+                              onClick={() => setDeleteTarget({ id: node.id, name: node.name })}
+                            >
+                              删除
+                            </button>
+                          ) : null}
+                          {node.kind === 'local' ? (
                           <button
                             type="button"
                             className="settings__node-edit-btn"
@@ -479,7 +687,8 @@ export function NavSidebar({
                           >
                             {localHelpOpen ? '收起' : '说明'}
                           </button>
-                          <span className="settings__node-tag">自动</span>
+                          ) : null}
+                          {node.kind === 'local' ? <span className="settings__node-tag">自动</span> : null}
                         </div>
                       ) : null}
                     </li>

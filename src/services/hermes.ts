@@ -103,7 +103,7 @@ async function nodeFetch(id: HermesInstanceId, apiPath: string, init: NodeFetchI
   }
 
   try {
-    if (c.kind === 'local') {
+    if (c.kind === 'local' && !c.baseUrl) {
       const headers: Record<string, string> = {}
       if (jsonBody !== undefined) headers['Content-Type'] = 'application/json'
       if (accept) headers.Accept = accept
@@ -179,6 +179,40 @@ export async function saveNodes(nodes: unknown): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(nodes),
   })
+}
+
+export type ObsidianNoteItem = {
+  title: string
+  path: string
+  relativePath: string
+  mtime: number
+  size: number
+  preview: string
+}
+
+export type ObsidianNotesResponse = {
+  root: string
+  notes: ObsidianNoteItem[]
+  truncated: boolean
+}
+
+export type ObsidianNoteContent = {
+  title: string
+  path: string
+  relativePath: string
+  content: string
+}
+
+export async function getObsidianNotes(root: string): Promise<ObsidianNotesResponse> {
+  return fetchLocalBridge<ObsidianNotesResponse>(
+    `/local-bridge/obsidian-notes?root=${encodeURIComponent(root)}`,
+  )
+}
+
+export async function getObsidianNote(root: string, file: string): Promise<ObsidianNoteContent> {
+  return fetchLocalBridge<ObsidianNoteContent>(
+    `/local-bridge/obsidian-note?root=${encodeURIComponent(root)}&file=${encodeURIComponent(file)}`,
+  )
 }
 
 async function fetchHermesResponse(instanceId: HermesInstanceId, path: string, init?: NodeFetchInit) {

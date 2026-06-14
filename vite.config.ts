@@ -90,6 +90,121 @@ function readBridgeEnv(name: string) {
   return normalizeUrl(readEnv(name))
 }
 
+type ObsidianNote = {
+  title: string
+  path: string
+  relativePath: string
+  mtime: number
+  size: number
+  preview: string
+}
+
+function titleFromMarkdown(filePath: string, content: string) {
+  const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim()
+  if (heading) return heading
+  return path.basename(filePath).replace(/\.(md|markdown)$/i, '')
+}
+
+function previewFromMarkdown(content: string) {
+  return content
+    .replace(/^---[\s\S]*?---\s*/m, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^#+\s+/gm, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`>#-]/g, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 180)
+}
+
+function scanObsidianNotes(rootInput: string) {
+  const root = path.resolve(rootInput.trim())
+  if (!root || !fs.existsSync(root)) {
+    throw new Error('目录不存在')
+  }
+  const stat = fs.statSync(root)
+  if (!stat.isDirectory()) {
+    throw new Error('请输入 Obsidian vault 的文件夹路径')
+  }
+
+  const notes: ObsidianNote[] = []
+  const maxNotes = 300
+  const maxDirs = 2000
+  let dirCount = 0
+  let truncated = false
+
+  const walk = (dir: string) => {
+    if (notes.length >= maxNotes || dirCount >= maxDirs) {
+      truncated = true
+      return
+    }
+    dirCount += 1
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      if (notes.length >= maxNotes) {
+        truncated = true
+        return
+      }
+      if (entry.name.startsWith('.obsidian') || entry.name === '.git' || entry.name === 'node_modules') continue
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(fullPath)
+        continue
+      }
+      if (!entry.isFile() || !/\.(md|markdown)$/i.test(entry.name)) continue
+      try {
+        const fileStat = fs.statSync(fullPath)
+        const content = fs.readFileSync(fullPath, 'utf8')
+        notes.push({
+          title: titleFromMarkdown(fullPath, content),
+          path: fullPath,
+          relativePath: path.relative(root, fullPath),
+          mtime: fileStat.mtimeMs,
+          size: fileStat.size,
+          preview: previewFromMarkdown(content),
+        })
+      } catch {
+        // Ignore unreadable notes and continue scanning the vault.
+      }
+    }
+  }
+
+  walk(root)
+  notes.sort((a, b) => b.mtime - a.mtime)
+  return { root, notes, truncated }
+}
+
+function readObsidianNote(rootInput: string, relativePathInput: string) {
+  const root = path.resolve(rootInput.trim())
+  const filePath = path.resolve(root, relativePathInput)
+  const relative = path.relative(root, filePath)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('笔记路径不在 Obsidian 目录内')
+  }
+  if (!/\.(md|markdown)$/i.test(filePath)) {
+    throw new Error('只能打开 Markdown 笔记')
+  }
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new Error('笔记不存在')
+  }
+  const content = fs.readFileSync(filePath, 'utf8')
+  return {
+    title: titleFromMarkdown(filePath, content),
+    path: filePath,
+    relativePath: relative,
+    content,
+  }
+}
+
 // #region debug-point A:proxy-session-key
 function readDebugServerConfig() {
   const envPath = path.join(process.cwd(), '.dbg', 'hermes-memory-header.env')
@@ -742,6 +857,43 @@ function createSkillsBridgePlugin(): Plugin {
             return
           }
           writeJson(res, 405, { error: 'Method Not Allowed' })
+          return
+        }
+
+        if (url.pathname === '/local-bridge/obsidian-notes') {
+          if (req.method !== 'GET') {
+            writeJson(res, 405, { error: 'Method Not Allowed' })
+            return
+          }
+          const root = url.searchParams.get('root') || ''
+          if (!root.trim()) {
+            writeJson(res, 400, { error: '缺少 Obsidian 目录' })
+            return
+          }
+          try {
+            writeJson(res, 200, scanObsidianNotes(root))
+          } catch (error) {
+            writeJson(res, 400, { error: error instanceof Error ? error.message : '读取 Obsidian 笔记失败' })
+          }
+          return
+        }
+
+        if (url.pathname === '/local-bridge/obsidian-note') {
+          if (req.method !== 'GET') {
+            writeJson(res, 405, { error: 'Method Not Allowed' })
+            return
+          }
+          const root = url.searchParams.get('root') || ''
+          const file = url.searchParams.get('file') || ''
+          if (!root.trim() || !file.trim()) {
+            writeJson(res, 400, { error: '缺少笔记路径' })
+            return
+          }
+          try {
+            writeJson(res, 200, readObsidianNote(root, file))
+          } catch (error) {
+            writeJson(res, 400, { error: error instanceof Error ? error.message : '读取 Markdown 笔记失败' })
+          }
           return
         }
 

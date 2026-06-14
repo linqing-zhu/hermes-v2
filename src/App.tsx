@@ -55,6 +55,7 @@ const MOUNT_STORAGE_KEY = 'cyber:mount-map'
 const KANBAN_STORAGE_KEY = 'cyber:kanban'
 const DISMISSED_STORAGE_KEY = 'cyber:dismissed-tasks'
 const LOCAL_NAME_KEY = 'cyber:local-name'
+const LOCAL_NODE_KEY = 'cyber:local-node'
 
 /** User-renamed local node name (local node is auto-detected, but the name is editable & persisted). */
 function loadLocalName(): string | null {
@@ -62,6 +63,32 @@ function loadLocalName(): string | null {
     return localStorage.getItem(LOCAL_NAME_KEY) || null
   } catch {
     return null
+  }
+}
+
+function loadLocalNodeOverride(): Partial<Pick<HermesNode, 'name' | 'host' | 'system' | 'apiKey' | 'sessionKey' | 'sshAlias'>> {
+  try {
+    const raw = localStorage.getItem(LOCAL_NODE_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveLocalNodeOverride(node: HermesNode) {
+  try {
+    localStorage.setItem(LOCAL_NAME_KEY, node.name)
+    localStorage.setItem(LOCAL_NODE_KEY, JSON.stringify({
+      name: node.name,
+      host: node.host,
+      system: node.system,
+      apiKey: node.apiKey,
+      sessionKey: node.sessionKey,
+      sshAlias: node.sshAlias,
+    }))
+  } catch {
+    // ignore
   }
 }
 
@@ -185,7 +212,9 @@ function App() {
         kind: n.kind,
         system: n.system,
         host: n.host,
-        baseUrl: n.kind === 'remote' ? (n.host.startsWith('http') ? n.host : `http://${n.host}`) : undefined,
+        baseUrl: n.kind === 'remote' || n.apiKey || (n.kind === 'local' && n.host !== '127.0.0.1:8642')
+          ? (n.host.startsWith('http') ? n.host : `http://${n.host}`)
+          : undefined,
         apiKey: n.apiKey,
         sessionKey: n.sessionKey,
         sshAlias: n.sshAlias,
@@ -209,18 +238,21 @@ function App() {
     getOfficeRuntimeConfig()
       .then((cfg) => {
         if (cancelled) return
+        const override = loadLocalNodeOverride()
         setLocalNode({
           id: cfg.localNode.id,
-          name: loadLocalName() ?? cfg.localNode.name,
+          name: override.name ?? loadLocalName() ?? cfg.localNode.name,
           host: cfg.localNode.host,
           system: cfg.localNode.system,
           accent: NODE_ACCENTS[0],
           kind: 'local',
+          ...override,
         })
       })
       .catch(() => {
         if (!cancelled) {
-          setLocalNode({ id: 'local', name: loadLocalName() ?? '本机 Hermes', host: '127.0.0.1:8642', system: 'local', accent: NODE_ACCENTS[0], kind: 'local' })
+          const override = loadLocalNodeOverride()
+          setLocalNode({ id: 'local', name: override.name ?? loadLocalName() ?? '本机 Hermes', host: '127.0.0.1:8642', system: 'local', accent: NODE_ACCENTS[0], kind: 'local', ...override })
         }
       })
     return () => {
@@ -369,6 +401,29 @@ function App() {
   const sessions = dashboard?.sessions ?? []
   const health = dashboard?.health ?? []
 
+  const isWebSession = useCallback((session: HermesSessionWithInstance) => {
+    const source = (session.source ?? '').trim().toLowerCase()
+    if (!source) return true
+    if (source.includes('feishu') || source.includes('lark')) return false
+    if (source.includes('clb') || source.includes('clib')) return false
+    if (source.includes('web') || source.includes('api') || source.includes('console') || source.includes('studio')) return true
+    return false
+  }, [])
+
+  const openNodeChat = useCallback(
+    (instanceId: HermesInstanceId = nodes[0]?.id ?? 'local') => {
+      const nodeSessions = sessions
+        .filter((s) => s.instanceId === instanceId)
+        .sort((a, b) => (b.last_active ?? b.started_at ?? 0) - (a.last_active ?? a.started_at ?? 0))
+      const targetSession = nodeSessions.find(isWebSession) ?? nodeSessions[0] ?? null
+      setChatTarget({
+        instanceId,
+        sessionId: targetSession?.id ?? null,
+      })
+    },
+    [isWebSession, nodes, sessions],
+  )
+
   const instanceStatus = useMemo(() => {
     const map = new Map<HermesInstanceId, { status: AgentStatus; reachable: boolean }>()
     for (const node of nodes) {
@@ -449,7 +504,22 @@ function App() {
     [health],
   )
 
-  // node CRUD — remote nodes only (the local node is auto-detected, not editable).
+  const refreshNodeData = useCallback(async () => {
+    const ids = nodes.map((n) => n.id)
+    await Promise.all([
+      loadDashboard(ids),
+      refreshRealTasks(),
+      Promise.all(nodes.map((node) => getProfiles(node.id).catch(() => null))).then((results) => {
+        const next: Record<HermesInstanceId, HermesProfilesResponse | null> = {}
+        results.forEach((result, index) => {
+          next[nodes[index].id] = result
+        })
+        setProfiles(next)
+      }),
+    ])
+  }, [loadDashboard, nodes, refreshRealTasks])
+
+  // node CRUD — the local node is auto-detected, but can be manually overridden.
   const addNode = useCallback(
     (draft: { name: string; host: string; system: string; apiKey?: string; sessionKey?: string; sshAlias?: string }) => {
       setCustomNodes((cur) => {
@@ -463,23 +533,23 @@ function App() {
 
   const updateNode = useCallback(
     (id: HermesInstanceId, draft: Partial<Pick<HermesNode, 'name' | 'host' | 'system' | 'apiKey' | 'sessionKey' | 'sshAlias'>>) => {
-      // Local node is auto-detected; only its name is editable (persisted to localStorage).
       if (localNode && id === localNode.id) {
-        setLocalNode((cur) => (cur ? { ...cur, ...draft } : cur))
-        if (draft.name !== undefined) {
-          try {
-            localStorage.setItem(LOCAL_NAME_KEY, draft.name)
-          } catch {
-            // ignore
-          }
-        }
+        setLocalNode((cur) => {
+          if (!cur) return cur
+          const next = { ...cur, ...draft }
+          saveLocalNodeOverride(next)
+          return next
+        })
+        window.setTimeout(() => void refreshNodeData(), 0)
         return
       }
-      setCustomNodes((cur) =>
-        cur.map((n) => (n.id === id ? { ...n, ...draft } : n)),
-      )
+      setCustomNodes((cur) => {
+        const next = cur.map((n) => (n.id === id ? { ...n, ...draft } : n))
+        window.setTimeout(() => void refreshNodeData(), 0)
+        return next
+      })
     },
-    [localNode],
+    [localNode, refreshNodeData],
   )
 
   const removeNode = useCallback((id: HermesInstanceId) => {
@@ -697,6 +767,7 @@ function App() {
         onUpdateNode={updateNode}
         onRemoveNode={removeNode}
         onTestNode={testNodeConnection}
+        onRefreshNodes={refreshNodeData}
       />
 
       <ErrorBoundary>
@@ -774,12 +845,7 @@ function App() {
                 agents={mountedAgents(node.id)}
                 outKeys={outKeys}
                 onConfigure={() => setConfigHermes(node.id)}
-                onChat={() =>
-                  setChatTarget({
-                    instanceId: node.id,
-                    sessionId: sessions.find((s) => s.instanceId === node.id)?.id ?? null,
-                  })
-                }
+                onChat={() => openNodeChat(node.id)}
                 onAgentClick={(agent) => setDispatchTarget({ agent, node })}
               />
             )
@@ -810,6 +876,7 @@ function App() {
           mounted={mountMap[configNode.id] ?? []}
           onSave={(ids) => handleSaveMount(configNode.id, ids)}
           onCreated={() => void reloadProfile(configNode.id)}
+          onOpenChat={() => openNodeChat(configNode.id)}
           onClose={() => setConfigHermes(null)}
         />
         </ErrorBoundary>
@@ -849,6 +916,7 @@ function App() {
       {skillGalleryOpen ? (
         <SkillGallery
           nodes={nodes.map((n) => ({ id: n.id, name: n.name, accent: n.accent }))}
+          onOpenChat={(instanceId) => openNodeChat(instanceId)}
           onClose={() => setSkillGalleryOpen(false)}
         />
       ) : null}
@@ -856,6 +924,7 @@ function App() {
       {jobListOpen ? (
         <JobList
           nodes={nodes.map((n) => ({ id: n.id, name: n.name, accent: n.accent }))}
+          onOpenChat={(instanceId) => openNodeChat(instanceId)}
           onClose={() => setJobListOpen(false)}
         />
       ) : null}

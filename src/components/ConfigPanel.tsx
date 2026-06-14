@@ -1,6 +1,34 @@
 import { useEffect, useState } from 'react'
-import { MAX_MOUNT, type HermesNode, agentGlyph } from '../data/cyber'
-import { createProfile, type HermesProfilesResponse } from '../services/hermes'
+import { MAX_MOUNT, type HermesNode } from '../data/cyber'
+import { createProfile, type HermesProfileAgent, type HermesProfilesResponse } from '../services/hermes'
+
+function agentInitial(name: string) {
+  const trimmed = name.trim()
+  if (!trimmed) return 'A'
+  const word = trimmed.match(/[\p{L}\p{N}]+/u)?.[0] ?? trimmed
+  return word.slice(0, 1).toUpperCase()
+}
+
+function agentHue(name: string) {
+  let hash = 0
+  for (const char of name) {
+    hash = (hash * 31 + char.charCodeAt(0)) % 360
+  }
+  return hash
+}
+
+function AgentAvatar({ agent, size = 'list' }: { agent: HermesProfileAgent; size?: 'list' | 'detail' }) {
+  return (
+    <span
+      className={`agent-avatar agent-avatar--${size}`}
+      style={{ ['--avatar-hue' as string]: agentHue(agent.name) }}
+      aria-hidden="true"
+    >
+      <span className="agent-avatar__initial">{agentInitial(agent.name)}</span>
+      <span className="agent-avatar__spark" />
+    </span>
+  )
+}
 
 export function ConfigPanel({
   node,
@@ -9,6 +37,7 @@ export function ConfigPanel({
   mounted,
   onSave,
   onCreated,
+  onOpenChat,
   onClose,
 }: {
   node: HermesNode
@@ -17,6 +46,7 @@ export function ConfigPanel({
   mounted: string[]
   onSave: (ids: string[]) => void
   onCreated: () => void
+  onOpenChat: () => void
   onClose: () => void
 }) {
   const [selected, setSelected] = useState<string[]>(mounted)
@@ -116,9 +146,14 @@ export function ConfigPanel({
               {node.system} · {node.host} · 选择要派驻的 agent（最多 {MAX_MOUNT} 个）
             </p>
           </div>
-          <button type="button" className="config-panel__close" onClick={onClose}>
-            ×
-          </button>
+          <div className="dialog-header-actions">
+            <button type="button" className="dialog-chat-btn" onClick={onOpenChat} title="打开对话">
+              💬
+            </button>
+            <button type="button" className="config-panel__close" onClick={onClose}>
+              ×
+            </button>
+          </div>
         </header>
 
         <div className="config-panel__body">
@@ -135,7 +170,7 @@ export function ConfigPanel({
               <div className="agent-detail__card">
                 <div className="agent-detail__head">
                   <span className="agent-detail__glyph" style={{ ['--accent' as string]: node.accent }}>
-                    {agentGlyph(detailAgent.name)}
+                    <AgentAvatar agent={detailAgent} size="detail" />
                   </span>
                   <div>
                     <h3>{detailAgent.name}</h3>
@@ -270,7 +305,7 @@ export function ConfigPanel({
                           }}
                           title="点击查看 agent 详情"
                         >
-                          {agentGlyph(agent.name)}
+                          <AgentAvatar agent={agent} />
                         </span>
                         <span
                           className="config-item__meta"

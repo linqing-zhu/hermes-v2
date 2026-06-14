@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   createSession,
   getNodeConn,
@@ -9,8 +9,6 @@ import {
   type HermesSessionWithInstance,
 } from '../services/hermes'
 import type { HermesMessageItem, HermesStreamEvent } from '../types/hermes'
-
-// --- chat message model ---
 
 type ToolCall = {
   id: string
@@ -23,20 +21,27 @@ type ToolCall = {
 }
 
 type ChatBlock =
-  | { kind: 'text'; id: string; role: 'user' | 'assistant' | 'tool'; text: string; streaming?: boolean }
-  | { kind: 'thinking'; id: string; text: string }
-  | { kind: 'tool'; id: string; tool: ToolCall }
+  | {
+      kind: 'text'
+      id: string
+      role: 'user' | 'assistant' | 'tool'
+      text: string
+      streaming?: boolean
+      thinking?: string
+      tools?: ToolCall[]
+    }
   | { kind: 'approval'; id: string; approvalId: string; action: string; context: string; agentName: string }
+
+type TextBlock = Extract<ChatBlock, { kind: 'text' }>
 
 function blockId(): string {
   return `b-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
-// --- helpers ---
-
 function normalizeRole(role: string): 'user' | 'assistant' | 'tool' {
-  if (role === 'user') return 'user'
-  if (role === 'tool') return 'tool'
+  const normalized = role.trim().toLowerCase()
+  if (['user', 'human', 'local', 'client', 'owner', 'me'].includes(normalized)) return 'user'
+  if (['tool', 'function', 'tool_result', 'toolresult'].includes(normalized)) return 'tool'
   return 'assistant'
 }
 
@@ -44,14 +49,38 @@ function messageText(message: HermesMessageItem): string {
   const content = message.content?.trim()
   if (content) return content
   if (message.tool_name) return `调用工具：${message.tool_name}`
-  if (message.reasoning_content?.trim()) return message.reasoning_content.trim()
   return ''
 }
 
-function readDelta(event: HermesStreamEvent): string {
-  const data = event.data as Record<string, unknown>
-  if (event.type === 'assistant.delta' && typeof data.delta === 'string') return data.delta
-  return ''
+function messageThinking(message: HermesMessageItem): string {
+  return message.reasoning_content?.trim() || message.reasoning?.trim() || ''
+}
+
+function historyToolFromMessage(message: HermesMessageItem): ToolCall {
+  const content = message.content?.trim()
+  let parsed: Record<string, unknown> = {}
+  if (content) {
+    try {
+      parsed = JSON.parse(content) as Record<string, unknown>
+    } catch {
+      parsed = {}
+    }
+  }
+  const command = typeof parsed.command === 'string' ? parsed.command : ''
+  const output = typeof parsed.output === 'string' ? parsed.output : ''
+  const status = typeof parsed.status === 'string' ? parsed.status : ''
+  const toolName =
+    message.tool_name?.trim() ||
+    (typeof parsed.tool_name === 'string' ? parsed.tool_name : '') ||
+    (command ? 'terminal' : 'tool')
+  const result = output || content || status
+  return {
+    id: String(message.tool_call_id || message.id),
+    name: toolName,
+    phase: status === 'error' ? 'error' : 'complete',
+    preview: command ? command.slice(0, 120) : undefined,
+    result: result ? result.slice(0, 4000) : undefined,
+  }
 }
 
 function readFinal(event: HermesStreamEvent): string | null {
@@ -61,17 +90,22 @@ function readFinal(event: HermesStreamEvent): string | null {
     const last = [...(data.messages as Array<{ role?: string; content?: string }>)]
       .reverse()
       .find((item) => item.role === 'assistant' && typeof item.content === 'string')
-    if (last?.content) return last.content
+    return last?.content || null
   }
   return null
 }
 
+function readRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
 function getToolName(data: Record<string, unknown>): string {
-  const toolCall = (data.tool_call ?? {}) as Record<string, unknown>
-  const tool = (data.tool ?? {}) as Record<string, unknown>
-  const fn = (toolCall.function ?? {}) as Record<string, unknown>
+  const toolCall = readRecord(data.tool_call)
+  const tool = readRecord(data.tool)
+  const fn = readRecord(toolCall.function)
   return (
     (typeof toolCall.tool_name === 'string' ? toolCall.tool_name : '') ||
+    (typeof toolCall.name === 'string' ? toolCall.name : '') ||
     (typeof data.tool_name === 'string' ? data.tool_name : '') ||
     (typeof fn.name === 'string' ? fn.name : '') ||
     (typeof tool.name === 'string' ? tool.name : '') ||
@@ -81,8 +115,8 @@ function getToolName(data: Record<string, unknown>): string {
 }
 
 function getToolCallId(data: Record<string, unknown>, runId: string | undefined, name: string): string {
-  const toolCall = (data.tool_call ?? {}) as Record<string, unknown>
-  const tool = (data.tool ?? {}) as Record<string, unknown>
+  const toolCall = readRecord(data.tool_call)
+  const tool = readRecord(data.tool)
   return (
     (typeof toolCall.id === 'string' ? toolCall.id : '') ||
     (typeof tool.id === 'string' ? tool.id : '') ||
@@ -98,14 +132,18 @@ function parseJsonIfPossible(value: unknown): unknown {
   const trimmed = value.trim()
   if (!trimmed) return value
   if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try { return JSON.parse(trimmed) } catch { return value }
+    try {
+      return JSON.parse(trimmed)
+    } catch {
+      return value
+    }
   }
   return value
 }
 
 function getToolArgs(data: Record<string, unknown>): unknown {
-  const toolCall = (data.tool_call ?? {}) as Record<string, unknown>
-  const fn = (toolCall.function ?? {}) as Record<string, unknown>
+  const toolCall = readRecord(data.tool_call)
+  const fn = readRecord(toolCall.function)
   return parseJsonIfPossible(toolCall.arguments ?? fn.arguments ?? data.args)
 }
 
@@ -113,17 +151,50 @@ function getToolResultPreview(data: Record<string, unknown>): string {
   const raw = data.result_preview ?? data.result ?? data.output ?? data.message
   if (typeof raw === 'string') return raw
   if (raw === undefined || raw === null) return ''
-  try { return JSON.stringify(raw, null, 2) } catch { return String(raw) }
+  try {
+    return JSON.stringify(raw, null, 2)
+  } catch {
+    return String(raw)
+  }
 }
 
 function getErrorMessage(data: Record<string, unknown>): string {
-  const err = data.error as Record<string, unknown> | undefined
-  return (typeof err?.message === 'string' ? err.message : '') ||
+  const err = readRecord(data.error)
+  return (typeof err.message === 'string' ? err.message : '') ||
     (typeof data.message === 'string' ? data.message : '') ||
     '未知错误'
 }
 
-// --- component ---
+function isSkillEvent(eventType: string, toolName: string, data: Record<string, unknown>): boolean {
+  const skill = readRecord(data.skill)
+  return (
+    eventType.includes('skill') ||
+    toolName.toLowerCase().includes('skill') ||
+    typeof data.skill_name === 'string' ||
+    typeof skill.name === 'string'
+  )
+}
+
+function getSkillDetail(data: Record<string, unknown>, fallbackName = 'skill') {
+  const skill = readRecord(data.skill)
+  const name =
+    (typeof skill.name === 'string' ? skill.name : '') ||
+    (typeof data.skill_name === 'string' ? data.skill_name : '') ||
+    (typeof data.name === 'string' ? data.name : '') ||
+    fallbackName
+  const detail: Record<string, unknown> = { name }
+  for (const key of ['description', 'category', 'path', 'version']) {
+    if (typeof skill[key] === 'string' && skill[key]) detail[key] = skill[key]
+  }
+  return {
+    name,
+    result: Object.keys(detail).length > 1 ? JSON.stringify(detail, null, 2) : `Loaded skill: ${name}`,
+  }
+}
+
+function isThinkingTool(name: string): boolean {
+  return name === '_thinking' || name === 'think' || name === 'thinking'
+}
 
 export function ChatDialog({
   instanceId,
@@ -141,46 +212,58 @@ export function ChatDialog({
   const [loading, setLoading] = useState(Boolean(initialSessionId))
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
+  const [expandedBlocks, setExpandedBlocks] = useState<Record<string, boolean>>({})
   const logRef = useRef<HTMLDivElement | null>(null)
+  const skipHistoryLoadRef = useRef<string | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const scrollFrameRef = useRef<number | null>(null)
+  const dragState = useRef<{ startX: number; startY: number; left: number; top: number } | null>(null)
+  const [closeClick, setCloseClick] = useState<{ x: number; y: number } | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
-  // Session list for switching
   const [sessions, setSessions] = useState<HermesSessionWithInstance[]>([])
-  const [sessionsLoading, setSessionsLoading] = useState(false)
-  const [showSessionList, setShowSessionList] = useState(false)
   const currentSession = useMemo(
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId],
   )
 
   const scrollToBottom = useCallback(() => {
-    requestAnimationFrame(() => {
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null
       const el = logRef.current
       if (el) el.scrollTop = el.scrollHeight
     })
   }, [])
 
-  // Load session list on open.
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) {
+        cancelAnimationFrame(scrollFrameRef.current)
+      }
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
-    setSessionsLoading(true)
     getSessions(instanceId)
       .then((data) => {
-        if (cancelled) return
-        setSessions(data.sort((a, b) => (b.last_active ?? 0) - (a.last_active ?? 0)))
+        if (!cancelled) setSessions(data.sort((a, b) => (b.last_active ?? 0) - (a.last_active ?? 0)))
       })
       .catch(() => {
         if (!cancelled) setSessions([])
       })
-      .finally(() => {
-        if (!cancelled) setSessionsLoading(false)
-      })
     return () => { cancelled = true }
   }, [instanceId])
 
-  // Load history for the chosen session.
   useEffect(() => {
     if (!sessionId) {
       setBlocks([])
+      setLoading(false)
+      return
+    }
+    if (skipHistoryLoadRef.current === sessionId) {
+      skipHistoryLoadRef.current = null
       setLoading(false)
       return
     }
@@ -192,13 +275,26 @@ export function ChatDialog({
         if (cancelled) return
         setBlocks(
           items
-            .map((item) => ({
-              kind: 'text' as const,
-              id: String(item.id),
-              role: normalizeRole(item.role),
-              text: messageText(item),
-            }))
-            .filter((b) => b.text),
+            .map((item) => {
+              const role = normalizeRole(item.role)
+              if (role === 'tool') {
+                return {
+                  kind: 'text' as const,
+                  id: String(item.id),
+                  role: 'assistant' as const,
+                  text: '',
+                  tools: [historyToolFromMessage(item)],
+                }
+              }
+              return {
+                kind: 'text' as const,
+                id: String(item.id),
+                role,
+                text: messageText(item),
+                thinking: role === 'assistant' ? messageThinking(item) : undefined,
+              }
+            })
+            .filter((b) => b.text || b.thinking || (b.tools?.length ?? 0) > 0),
         )
         scrollToBottom()
       })
@@ -211,275 +307,229 @@ export function ChatDialog({
     return () => { cancelled = true }
   }, [instanceId, sessionId, scrollToBottom])
 
-  // --- send handler with full SSE event processing ---
-
   const handleSend = async () => {
     const text = draft.trim()
     if (!text || sending) return
     setSending(true)
     setError('')
     setDraft('')
+    requestAnimationFrame(() => inputRef.current?.focus())
 
     const userBlock: ChatBlock = { kind: 'text', id: blockId(), role: 'user', text }
     const assistantBlockId = blockId()
-    setBlocks((cur) => [...cur, userBlock, { kind: 'text', id: assistantBlockId, role: 'assistant', text: '', streaming: true }])
+    const assistantBlock: ChatBlock = {
+      kind: 'text',
+      id: assistantBlockId,
+      role: 'assistant',
+      text: '',
+      streaming: true,
+      thinking: '',
+      tools: [],
+    }
+    setBlocks((cur) => [...cur, userBlock, assistantBlock])
     scrollToBottom()
+
+    const updateAssistant = (fn: (block: TextBlock) => TextBlock) => {
+      setBlocks((cur) =>
+        cur.map((b) => {
+          if (b.kind !== 'text' || b.id !== assistantBlockId || b.role !== 'assistant') return b
+          return fn(b)
+        }),
+      )
+    }
+
+    const upsertTool = (tool: ToolCall, options?: { appendResult?: boolean }) => {
+      updateAssistant((b) => {
+        const tools = [...(b.tools ?? [])]
+        const index = tools.findIndex((item) => item.id === tool.id)
+        if (index >= 0) {
+          const previous = tools[index]
+          tools[index] = {
+            ...previous,
+            ...tool,
+            args: tool.args ?? previous.args,
+            preview: tool.preview ?? previous.preview,
+            result: options?.appendResult
+              ? `${previous.result ?? ''}${tool.result ?? ''}`
+              : tool.result ?? previous.result,
+            errorMessage: tool.errorMessage ?? previous.errorMessage,
+          }
+        }
+        else tools.push(tool)
+        return { ...b, tools }
+      })
+    }
 
     try {
       let activeSessionId = sessionId
       if (!activeSessionId) {
         const session = await createSession(instanceId)
         activeSessionId = session.id
+        skipHistoryLoadRef.current = session.id
         setSessionId(session.id)
-        getSessions(instanceId).then((data) =>
-          setSessions(data.sort((a, b) => (b.last_active ?? 0) - (a.last_active ?? 0))),
-        ).catch(() => {})
+        getSessions(instanceId)
+          .then((data) => setSessions(data.sort((a, b) => (b.last_active ?? 0) - (a.last_active ?? 0))))
+          .catch(() => {})
       }
 
       let buffer = ''
       let final: string | null = null
       let runId: string | undefined
-      const toolBlocks: Map<string, ChatBlock> = new Map() // toolCallId → ChatBlock
-      const thinkingBlocks: Map<string, ChatBlock> = new Map() // toolCallId → ChatBlock
-
-      const applyBlocks = (fn: (cur: ChatBlock[]) => ChatBlock[]) => {
-        setBlocks(fn)
+      let pendingText: string | null = null
+      let textFrame: number | null = null
+      const scheduleAssistantText = (textValue: string) => {
+        pendingText = textValue
+        if (textFrame !== null) return
+        textFrame = requestAnimationFrame(() => {
+          textFrame = null
+          if (pendingText === null) return
+          const nextText = pendingText
+          pendingText = null
+          updateAssistant((b) => ({ ...b, text: nextText }))
+          scrollToBottom()
+        })
+      }
+      const flushAssistantText = () => {
+        if (textFrame !== null) {
+          cancelAnimationFrame(textFrame)
+          textFrame = null
+        }
+        if (pendingText === null) return
+        const nextText = pendingText
+        pendingText = null
+        updateAssistant((b) => ({ ...b, text: nextText }))
       }
 
       await streamSessionChat(instanceId, activeSessionId, text, {
         onEvent: (event) => {
           const data = event.data as Record<string, unknown>
-          const evtRunId: string | undefined =
-            typeof data.run_id === 'string' && data.run_id.trim() ? data.run_id : runId
+          const evtRunId = typeof data.run_id === 'string' && data.run_id.trim() ? data.run_id : runId
           if (evtRunId && !runId) runId = evtRunId
 
-          // --- text delta ---
           if (event.type === 'assistant.delta') {
-            const delta = readDelta(event)
-            if (delta) {
-              buffer += delta
-              applyBlocks((cur) =>
-                cur.map((b) => (b.id === assistantBlockId && b.kind === 'text' ? { ...b, text: buffer } : b)),
-              )
-              scrollToBottom()
-            }
+            const delta = typeof data.delta === 'string' ? data.delta : ''
+            if (!delta) return
+            buffer += delta
+            scheduleAssistantText(buffer)
             return
           }
 
-          // --- tool events ---
-          const toolEventTypes = ['tool.started', 'tool.pending', 'tool.calling', 'tool.running']
-          if (toolEventTypes.includes(event.type)) {
-            const toolName = getToolName(data)
-            const callId = getToolCallId(data, runId, toolName)
-            const phase: ToolCall['phase'] = (event.type === 'tool.pending' || event.type === 'tool.started') ? 'pending' : 'calling'
-
-            // If progress comes for _thinking, route to thinking block
-            if (toolName === '_thinking' || toolName === 'think') {
-              if (!thinkingBlocks.has(callId)) {
-                const tb: ChatBlock = { kind: 'thinking', id: blockId(), text: '' }
-                thinkingBlocks.set(callId, tb)
-                applyBlocks((cur) => [...cur, tb!])
-              }
+          if (['tool.started', 'tool.pending', 'tool.calling', 'tool.running'].includes(event.type)) {
+            const rawToolName = getToolName(data)
+            const callId = getToolCallId(data, runId, rawToolName)
+            const phase: ToolCall['phase'] = event.type === 'tool.pending' || event.type === 'tool.started' ? 'pending' : 'calling'
+            const skillInfo = isSkillEvent(event.type, rawToolName, data) ? getSkillDetail(data, rawToolName) : null
+            if (isThinkingTool(rawToolName)) {
+              updateAssistant((b) => ({ ...b, thinking: b.thinking || '' }))
               return
             }
-
-            if (!toolBlocks.has(callId)) {
-              const tb: ChatBlock = {
-                kind: 'tool',
-                id: blockId(),
-                tool: {
-                  id: callId,
-                  name: toolName,
-                  args: getToolArgs(data),
-                  preview: typeof data.preview === 'string' ? data.preview : undefined,
-                  phase,
-                },
-              }
-              toolBlocks.set(callId, tb)
-              applyBlocks((cur) => [...cur, tb!])
-              scrollToBottom()
-            } else {
-              const existing = toolBlocks.get(callId)!
-              applyBlocks((cur) =>
-                cur.map((b) =>
-                  b.id === existing.id && b.kind === 'tool'
-                    ? { ...b, tool: { ...b.tool, phase, args: b.tool.args ?? getToolArgs(data) } }
-                    : b,
-                ),
-              )
-            }
+            upsertTool({
+              id: callId,
+              name: skillInfo ? 'skill' : rawToolName,
+              args: getToolArgs(data),
+              preview: skillInfo?.name ?? (typeof data.preview === 'string' ? data.preview : undefined),
+              phase,
+            })
+            scrollToBottom()
             return
           }
 
-          // --- tool progress ---
           if (event.type === 'tool.progress') {
             const delta = typeof data.delta === 'string' ? data.delta : ''
             if (!delta) return
-            const toolName = getToolName(data)
-            const callId = getToolCallId(data, runId, toolName)
-
-            if (toolName === '_thinking' || toolName === 'think') {
-              let tb = thinkingBlocks.get(callId)
-              if (!tb) {
-                tb = { kind: 'thinking', id: blockId(), text: delta }
-                thinkingBlocks.set(callId, tb)
-                applyBlocks((cur) => [...cur, tb!])
-              } else {
-                const tid = tb.id
-                applyBlocks((cur) =>
-                  cur.map((b) => (b.id === tid && b.kind === 'thinking' ? { ...b, text: b.text + delta } : b)),
-                )
-              }
+            const rawToolName = getToolName(data)
+            const callId = getToolCallId(data, runId, rawToolName)
+            if (isThinkingTool(rawToolName)) {
+              updateAssistant((b) => ({ ...b, thinking: `${b.thinking ?? ''}${delta}` }))
               scrollToBottom()
               return
             }
-
-            let tb = toolBlocks.get(callId)
-            if (!tb) {
-              tb = {
-                kind: 'tool',
-                id: blockId(),
-                tool: { id: callId, name: toolName, phase: 'calling', args: getToolArgs(data) },
-              }
-              toolBlocks.set(callId, tb)
-              applyBlocks((cur) => [...cur, tb!])
-            }
-            const tid = tb.id
-            applyBlocks((cur) =>
-              cur.map((b) =>
-                b.id === tid && b.kind === 'tool'
-                  ? { ...b, tool: { ...b.tool, phase: 'progress', result: (b.tool.result ?? '') + delta } }
-                  : b,
-              ),
-            )
+            const skillInfo = isSkillEvent(event.type, rawToolName, data) ? getSkillDetail(data, rawToolName) : null
+            upsertTool({
+              id: callId,
+              name: skillInfo ? 'skill' : rawToolName,
+              args: getToolArgs(data),
+              preview: skillInfo?.name,
+              phase: 'progress',
+              result: delta,
+            }, { appendResult: true })
             scrollToBottom()
             return
           }
 
-          // --- tool completed ---
           if (event.type === 'tool.completed') {
-            const toolName = getToolName(data)
-            const callId = getToolCallId(data, runId, toolName)
+            const rawToolName = getToolName(data)
+            const callId = getToolCallId(data, runId, rawToolName)
             const result = getToolResultPreview(data)
-
-            if (toolName === '_thinking' || toolName === 'think') {
-              if (result) {
-                const tb = thinkingBlocks.get(callId)
-                if (tb) {
-                  applyBlocks((cur) =>
-                    cur.map((b) => (b.id === tb!.id && b.kind === 'thinking' ? { ...b, text: result } : b)),
-                  )
-                }
-              }
+            if (isThinkingTool(rawToolName)) {
+              if (result) updateAssistant((b) => ({ ...b, thinking: result }))
               return
             }
-
-            let tb = toolBlocks.get(callId)
-            if (!tb) {
-              tb = {
-                kind: 'tool',
-                id: blockId(),
-                tool: { id: callId, name: toolName, phase: 'complete', args: getToolArgs(data), result: result.slice(0, 4000) },
-              }
-              toolBlocks.set(callId, tb)
-              applyBlocks((cur) => [...cur, tb!])
-            } else {
-              const tid = tb.id
-              applyBlocks((cur) =>
-                cur.map((b) =>
-                  b.id === tid && b.kind === 'tool'
-                    ? { ...b, tool: { ...b.tool, phase: 'complete' as const, result: result.slice(0, 4000) } }
-                    : b,
-                ),
-              )
-            }
+            const skillInfo = isSkillEvent(event.type, rawToolName, data) ? getSkillDetail(data, rawToolName) : null
+            upsertTool({
+              id: callId,
+              name: skillInfo ? 'skill' : rawToolName,
+              args: getToolArgs(data),
+              preview: skillInfo?.name,
+              phase: 'complete',
+              result: (skillInfo?.result ?? result).slice(0, 4000),
+            })
             scrollToBottom()
             return
           }
 
-          // --- tool failed ---
           if (event.type === 'tool.failed') {
-            const toolName = getToolName(data)
-            const callId = getToolCallId(data, runId, toolName)
-            const errMsg = getErrorMessage(data)
-            let tb = toolBlocks.get(callId)
-            if (!tb) {
-              tb = {
-                kind: 'tool',
-                id: blockId(),
-                tool: { id: callId, name: toolName, phase: 'error', errorMessage: errMsg },
-              }
-              toolBlocks.set(callId, tb)
-              applyBlocks((cur) => [...cur, tb!])
-            } else {
-              const tid = tb.id
-              applyBlocks((cur) =>
-                cur.map((b) =>
-                  b.id === tid && b.kind === 'tool'
-                    ? { ...b, tool: { ...b.tool, phase: 'error' as const, errorMessage: errMsg } }
-                    : b,
-                ),
-              )
-            }
-            scrollToBottom()
-            return
-          }
-
-          // --- artifacts / memory / skills (all rendered as tool cards) ---
-          if (event.type === 'artifact.created') {
-            const artifact = (data.artifact ?? {}) as Record<string, unknown>
-            const result =
-              (typeof artifact.title === 'string' ? artifact.title : '') ||
-              (typeof artifact.path === 'string' ? artifact.path : '') ||
-              (typeof data.path === 'string' ? data.path : '') ||
-              'Artifact created'
-            const toolName = (typeof data.tool_name === 'string' ? data.tool_name : '') || 'artifact'
-            applyBlocks((cur) => [
-              ...cur,
-              {
-                kind: 'tool',
-                id: blockId(),
-                tool: { id: blockId(), name: toolName, phase: 'complete' as const, result },
-              },
-            ])
-            scrollToBottom()
-            return
-          }
-
-          if (event.type === 'memory.updated') {
-            const result = (typeof data.message === 'string' ? data.message : '') ||
-              `Updated ${typeof data.target === 'string' ? data.target : 'memory'}`
-            applyBlocks((cur) => [
-              ...cur,
-              { kind: 'tool', id: blockId(), tool: { id: blockId(), name: 'memory', phase: 'complete' as const, result } },
-            ])
+            const rawToolName = getToolName(data)
+            const callId = getToolCallId(data, runId, rawToolName)
+            upsertTool({
+              id: callId,
+              name: rawToolName,
+              phase: 'error',
+              errorMessage: getErrorMessage(data),
+            })
             scrollToBottom()
             return
           }
 
           if (event.type === 'skill.loaded') {
-            const skill = (data.skill ?? {}) as Record<string, unknown>
-            const result = (typeof skill.name === 'string' ? skill.name : '') ||
-              (typeof data.skill_name === 'string' ? data.skill_name : '') ||
-              'Skill loaded'
-            applyBlocks((cur) => [
-              ...cur,
-              { kind: 'tool', id: blockId(), tool: { id: blockId(), name: 'skill', phase: 'complete' as const, result } },
-            ])
+            const skillInfo = getSkillDetail(data, 'Skill loaded')
+            upsertTool({
+              id: (typeof data.tool_call_id === 'string' && data.tool_call_id) || blockId(),
+              name: 'skill',
+              phase: 'complete',
+              preview: skillInfo.name,
+              result: skillInfo.result,
+            })
             scrollToBottom()
             return
           }
 
-          // --- approval ---
+          if (event.type === 'artifact.created' || event.type === 'memory.updated') {
+            const artifact = readRecord(data.artifact)
+            const result =
+              (typeof artifact.title === 'string' ? artifact.title : '') ||
+              (typeof artifact.path === 'string' ? artifact.path : '') ||
+              (typeof data.path === 'string' ? data.path : '') ||
+              (typeof data.message === 'string' ? data.message : '') ||
+              (event.type === 'memory.updated' ? 'Memory updated' : 'Artifact created')
+            upsertTool({
+              id: (typeof data.tool_call_id === 'string' && data.tool_call_id) || blockId(),
+              name: event.type === 'memory.updated' ? 'memory' : (typeof data.tool_name === 'string' ? data.tool_name : 'artifact'),
+              phase: 'complete',
+              result,
+            })
+            scrollToBottom()
+            return
+          }
+
           if (event.type === 'approval.required' || event.type === 'tool.approval' || event.type === 'exec.approval') {
             const approvalId =
               (typeof data.approval_id === 'string' ? data.approval_id : '') ||
               (typeof data.approvalId === 'string' ? data.approvalId : '') ||
               (typeof data.id === 'string' ? data.id : '') ||
               blockId()
-            applyBlocks((cur) => [
-              ...cur,
-              {
+            setBlocks((cur) => {
+              const approvalBlock: ChatBlock = {
                 kind: 'approval',
                 id: blockId(),
                 approvalId,
@@ -497,81 +547,56 @@ export function ChatDialog({
                   (typeof data.agent_name === 'string' ? data.agent_name : '') ||
                   (typeof data.agent_id === 'string' ? data.agent_id : '') ||
                   'Agent',
-              },
-            ])
+              }
+              const assistantIndex = cur.findIndex((b) => b.kind === 'text' && b.id === assistantBlockId)
+              if (assistantIndex < 0) return [...cur, approvalBlock]
+              return [
+                ...cur.slice(0, assistantIndex),
+                approvalBlock,
+                ...cur.slice(assistantIndex),
+              ]
+            })
             scrollToBottom()
             return
           }
 
-          // --- assistant completed ---
           if (event.type === 'assistant.completed') {
             const content = readFinal(event)
-            if (content && content !== buffer) {
-              buffer = content
-              applyBlocks((cur) =>
-                cur.map((b) => (b.id === assistantBlockId && b.kind === 'text' ? { ...b, text: buffer, streaming: false } : b)),
-              )
-              scrollToBottom()
-            }
+            if (!content) return
+            flushAssistantText()
+            buffer = content
+            updateAssistant((b) => ({ ...b, text: buffer, streaming: false }))
+            scrollToBottom()
             return
           }
 
-          // --- run completed ---
           if (event.type === 'run.completed') {
             const content = readFinal(event)
             if (content) final = content
             return
           }
 
-          // --- error ---
           if (event.type === 'error') {
-            const errMsg = getErrorMessage(data)
-            setError(errMsg)
-            return
+            setError(getErrorMessage(data))
           }
         },
       })
 
-      // Finalize the assistant text block
       const output = (final ?? buffer).trim() || '（没有返回文本内容）'
-      setBlocks((cur) =>
-        cur.map((b) =>
-          b.id === assistantBlockId && b.kind === 'text' ? { ...b, text: output, streaming: false } : b,
-        ),
-      )
+      flushAssistantText()
+      updateAssistant((b) => ({ ...b, text: output, streaming: false }))
       scrollToBottom()
     } catch (err) {
+      // If a stream fails between animation frames, keep whatever was already buffered.
       setError(err instanceof Error ? err.message : '发送失败')
-      setBlocks((cur) =>
-        cur.map((b) =>
-          b.id === assistantBlockId && b.kind === 'text'
-            ? { ...b, text: b.text || '（发送失败）', streaming: false }
-            : b,
-        ),
-      )
+      updateAssistant((b) => ({ ...b, text: b.text || '（发送失败）', streaming: false }))
     } finally {
       setSending(false)
+      requestAnimationFrame(() => inputRef.current?.focus())
     }
   }
 
-  const switchSession = (sid: string) => {
-    setSessionId(sid)
-    setShowSessionList(false)
-  }
-
-  const handleNewSession = async () => {
-    setSessionId(null)
-    setBlocks([])
-    setShowSessionList(false)
-    setError('')
-  }
-
-  // --- render ---
-
-  const dialogRef = useRef<HTMLDivElement>(null)
-  const dragState = useRef<{ startX: number; startY: number; left: number; top: number } | null>(null)
-
-  const onHeaderMouseDown = (e: React.MouseEvent) => {
+  const onHeaderMouseDown = (e: ReactMouseEvent) => {
     const el = dialogRef.current
     if (!el) return
     const rect = el.getBoundingClientRect()
@@ -584,12 +609,9 @@ export function ChatDialog({
 
   const onDragMove = (e: MouseEvent) => {
     const ds = dragState.current
-    if (!ds) return
     const el = dialogRef.current
-    if (!el) return
-    const dx = e.clientX - ds.startX
-    const dy = e.clientY - ds.startY
-    el.style.transform = `translate(${dx}px, ${dy}px)`
+    if (!ds || !el) return
+    el.style.transform = `translate(${e.clientX - ds.startX}px, ${e.clientY - ds.startY}px)`
   }
 
   const onDragUp = () => {
@@ -598,178 +620,136 @@ export function ChatDialog({
     dragState.current = null
   }
 
-  const [closeClick, setCloseClick] = useState<{ x: number; y: number } | null>(null)
+  const renderTool = (tool: ToolCall) => {
+    const phaseLabel =
+      tool.phase === 'pending' ? '准备中' :
+      tool.phase === 'calling' ? '调用中' :
+      tool.phase === 'progress' ? '执行中' :
+      tool.phase === 'complete' ? '已完成' :
+      tool.phase === 'error' ? '失败' : '...'
+    const isRunning = tool.phase !== 'complete' && tool.phase !== 'error'
+    const isExpanded = expandedBlocks[tool.id] ?? false
+    const hasDetails = tool.args != null || Boolean(tool.preview || tool.result || tool.errorMessage)
+    const displayName = tool.name === 'skill' ? `view skill${tool.preview ? `: ${tool.preview}` : ''}` : tool.name
+    return (
+      <div key={tool.id} className={`chat-tool ${isRunning ? 'is-running' : ''} ${tool.phase === 'error' ? 'is-error' : ''}`}>
+        <button
+          type="button"
+          className="chat-tool__head"
+          onClick={() => setExpandedBlocks((current) => ({ ...current, [tool.id]: !isExpanded }))}
+        >
+          <span className="chat-tool__icon">{tool.phase === 'error' ? '!' : tool.phase === 'complete' ? '✓' : '⚡'}</span>
+          <strong className="chat-tool__name">{displayName}</strong>
+          <span className="chat-tool__phase">{phaseLabel}</span>
+          <span className="chat-tool__chevron">{isExpanded ? '⌃' : '›'}</span>
+        </button>
+        {isExpanded && tool.args != null ? (
+          <pre className="chat-tool__args">{typeof tool.args === 'string' ? tool.args : JSON.stringify(tool.args, null, 2)}</pre>
+        ) : null}
+        {isExpanded && tool.preview ? <p className="chat-tool__preview">{tool.preview}</p> : null}
+        {isExpanded && tool.result ? <pre className="chat-tool__result">{tool.result}</pre> : null}
+        {isExpanded && tool.errorMessage ? <p className="chat-tool__error">{tool.errorMessage}</p> : null}
+        {isExpanded && !hasDetails ? <p className="chat-tool__empty">No detail available for this tool call</p> : null}
+      </div>
+    )
+  }
+
+  const renderThinking = (id: string, thinking: string, streaming?: boolean, hasAnswer?: boolean) => {
+    if (!streaming || hasAnswer) return null
+    const isExpanded = expandedBlocks[`${id}:thinking`] ?? false
+    return (
+      <div className={`chat-thinking ${isExpanded ? 'is-expanded' : ''}`}>
+        <button
+          type="button"
+          className="chat-thinking__head"
+          onClick={() => setExpandedBlocks((current) => ({ ...current, [`${id}:thinking`]: !isExpanded }))}
+        >
+          <span className="chat-thinking__dots" aria-hidden="true"><i /><i /><i /></span>
+          <strong>Thinking<span className="chat-thinking__trail">......</span></strong>
+          <span className="chat-thinking__chevron">{isExpanded ? '⌃' : '›'}</span>
+        </button>
+        {isExpanded ? <p className="chat-thinking__text">{thinking || 'No detail available yet.'}</p> : null}
+      </div>
+    )
+  }
 
   return (
     <div
       className="chat-dialog__backdrop"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) {
-          setCloseClick({ x: e.clientX, y: e.clientY })
-        }
+        if (e.target === e.currentTarget) setCloseClick({ x: e.clientX, y: e.clientY })
       }}
       onMouseUp={(e) => {
-        if (closeClick && Math.abs(e.clientX - closeClick.x) < 8 && Math.abs(e.clientY - closeClick.y) < 8) {
-          onClose()
-        }
+        if (closeClick && Math.abs(e.clientX - closeClick.x) < 8 && Math.abs(e.clientY - closeClick.y) < 8) onClose()
         setCloseClick(null)
       }}
     >
-      <div className="chat-dialog" ref={dialogRef} onClick={(e) => { e.stopPropagation() }} onMouseDown={(e) => { setCloseClick(null); e.stopPropagation() }}>
+      <div className="chat-dialog" ref={dialogRef} onClick={(e) => e.stopPropagation()} onMouseDown={(e) => { setCloseClick(null); e.stopPropagation() }}>
         <header className="chat-dialog__header" onMouseDown={onHeaderMouseDown} style={{ cursor: 'move', userSelect: 'none' }}>
           <div>
-            <h2>
-              {currentSession
-                ? (currentSession.title || currentSession.preview || '(无标题)')
-                : instance?.name ?? instanceId}
-            </h2>
+            <h2>{currentSession ? (currentSession.title || currentSession.preview || '(无标题)') : instance?.name ?? instanceId}</h2>
             <p>
               {instance?.system} · {instance?.host}
-              {sessionId
-                ? ` · ${currentSession?.model || '未知模型'}`
-                : ' · 新会话'}
+              {sessionId ? ` · ${currentSession?.model || '未知模型'}` : ' · 新会话'}
             </p>
           </div>
           <div className="chat-dialog__header-actions">
-            <button
-              type="button"
-              className="chat-dialog__sessions-btn"
-              onClick={() => setShowSessionList((v) => !v)}
-              title="切换会话"
-            >
-              💬
-            </button>
-            <button type="button" className="chat-dialog__close" onClick={onClose}>
-              ×
-            </button>
+            <button type="button" className="chat-dialog__close" onClick={onClose}>×</button>
           </div>
         </header>
 
-        {/* Session picker dropdown */}
-        {showSessionList ? (
-          <div className="chat-dialog__session-picker">
-            <button
-              type="button"
-              className="chat-dialog__new-session-btn"
-              onClick={() => void handleNewSession()}
-            >
-              ＋ 新建会话
-            </button>
-            {sessionsLoading ? (
-              <div className="chat-dialog__hint">加载会话列表…</div>
-            ) : sessions.length === 0 ? (
-              <div className="chat-dialog__hint">暂无历史会话</div>
-            ) : (
-              <ul className="chat-dialog__session-list">
-                {sessions.map((s) => (
-                  <li key={s.id}>
-                    <button
-                      type="button"
-                      className={`chat-dialog__session-item ${s.id === sessionId ? 'is-active' : ''}`}
-                      onClick={() => switchSession(s.id)}
-                    >
-                      <span className="chat-dialog__session-title">
-                        {s.title || s.preview || '(无标题)'}
-                      </span>
-                      <span className="chat-dialog__session-meta">
-                        {s.model ? `${s.model}` : ''}
-                        {s.message_count ? ` · ${s.message_count} 条消息` : ''}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ) : null}
-
         <div className="chat-dialog__log" ref={logRef}>
           {loading ? (
-            <div className="chat-dialog__hint">正在加载历史消息…</div>
+            <div className="chat-dialog__hint">正在加载历史消息...</div>
           ) : blocks.length ? (
-            blocks.map((block) => {
-              if (block.kind === 'tool') {
-                const t = block.tool
-                const phaseIcon =
-                  t.phase === 'error' ? '❌' :
-                  t.phase === 'complete' ? '✅' :
-                  t.phase === 'progress' || t.phase === 'calling' ? '⚙' :
-                  '⏳'
-                const phaseLabel =
-                  t.phase === 'pending' ? '准备中' :
-                  t.phase === 'calling' ? '调用中' :
-                  t.phase === 'progress' ? '执行中' :
-                  t.phase === 'complete' ? '已完成' :
-                  t.phase === 'error' ? '失败' : '…'
-                const isRunning = t.phase !== 'complete' && t.phase !== 'error'
-                return (
-                  <div key={block.id} className={`chat-tool ${isRunning ? 'is-running' : ''} ${t.phase === 'error' ? 'is-error' : ''}`}>
-                    <div className="chat-tool__head">
-                      <span className="chat-tool__icon">{phaseIcon}</span>
-                      <strong className="chat-tool__name">{t.name}</strong>
-                      <span className="chat-tool__phase">{phaseLabel}</span>
-                    </div>
-                    {t.args != null ? (
-                      <pre className="chat-tool__args">
-                        {typeof t.args === 'string' ? t.args : JSON.stringify(t.args, null, 2)}
-                      </pre>
-                    ) : null}
-                    {t.preview ? (
-                      <p className="chat-tool__preview">{t.preview}</p>
-                    ) : null}
-                    {t.result ? (
-                      <pre className="chat-tool__result">{t.result}</pre>
-                    ) : null}
-                    {t.errorMessage ? (
-                      <p className="chat-tool__error">{t.errorMessage}</p>
-                    ) : null}
-                  </div>
-                )
-              }
-
-              if (block.kind === 'thinking') {
-                return (
-                  <div key={block.id} className="chat-thinking">
-                    <span className="chat-thinking__label">💭 思考中</span>
-                    <p className="chat-thinking__text">{block.text}</p>
-                  </div>
-                )
-              }
-
+            blocks.map((block, index) => {
               if (block.kind === 'approval') {
                 return (
                   <div key={block.id} className="chat-approval">
                     <div className="chat-approval__head">
-                      <span className="chat-approval__icon">⚠️</span>
+                      <span className="chat-approval__icon">⚠</span>
                       <strong>{block.agentName} 需要审批</strong>
                     </div>
                     <p className="chat-approval__action">{block.action}</p>
-                    {block.context ? (
-                      <pre className="chat-approval__context">{block.context}</pre>
-                    ) : null}
-                    <p className="chat-approval__hint">
-                      请在 Hermes 终端中回复审批请求（approve/reject）
-                    </p>
+                    {block.context ? <pre className="chat-approval__context">{block.context}</pre> : null}
+                    <p className="chat-approval__hint">请在 Hermes 终端中回复审批请求（approve/reject）。</p>
                   </div>
                 )
               }
 
-              // text block
+              if (block.role === 'assistant' && block.streaming && !block.text.trim() && !(block.thinking || block.tools?.length)) {
+                return null
+              }
+
+              const previous = blocks[index - 1]
+              const isHermesSide = block.role === 'assistant' || block.role === 'tool'
+              const previousIsHermesSide = previous?.kind === 'text' && (previous.role === 'assistant' || previous.role === 'tool')
+              const showRole = !isHermesSide || !previousIsHermesSide
+              const roleLabel = block.role === 'user' ? '你' : instance?.name
+              const processBlocks = block.role === 'assistant' ? (
+                <div className="chat-process-stack">
+                  {renderThinking(block.id, block.thinking ?? '', block.streaming, Boolean(block.text.trim()))}
+                  {(block.tools ?? []).map(renderTool)}
+                </div>
+              ) : null
+              const shouldShowText = block.text.trim() || block.streaming
+
               return (
-                <div key={block.id} className={`chat-bubble chat-bubble--${block.role}`}>
-                  <span className="chat-bubble__role">
-                    {block.role === 'user' ? '你' : block.role === 'tool' ? '工具' : instance?.name}
-                  </span>
-                  <p>
-                    {block.text}
-                    {block.streaming ? <span className="chat-bubble__caret" /> : null}
-                  </p>
+                <div key={block.id} className={`chat-bubble chat-bubble--${block.role} ${isHermesSide ? 'chat-bubble--hermes' : ''} ${!showRole ? 'is-continuation' : ''}`}>
+                  {showRole ? <span className="chat-bubble__role">{roleLabel}</span> : null}
+                  {processBlocks}
+                  {shouldShowText ? (
+                    <p>
+                      {block.text}
+                      {block.streaming ? <span className="chat-bubble__caret" /> : null}
+                    </p>
+                  ) : null}
                 </div>
               )
             })
           ) : (
             <div className="chat-dialog__hint">
-              {sessionId ? '该会话暂无消息。' : '开始一段新对话 — 输入消息并按 Enter 发送。'}
+              {sessionId ? '该会话暂无消息。' : '开始一段新对话，输入消息并按 Enter 发送。'}
             </div>
           )}
         </div>
@@ -778,6 +758,7 @@ export function ChatDialog({
 
         <div className="chat-dialog__composer">
           <textarea
+            ref={inputRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
@@ -786,7 +767,7 @@ export function ChatDialog({
                 void handleSend()
               }
             }}
-            placeholder={sessionId ? `继续对话…（Enter 发送）` : `和 ${instance?.name ?? 'Hermes'} 说点什么…（Enter 发送）`}
+            placeholder={sessionId ? '继续对话...（Enter 发送）' : `和 ${instance?.name ?? 'Hermes'} 说点什么...（Enter 发送）`}
             rows={2}
             disabled={sending}
           />
@@ -796,7 +777,7 @@ export function ChatDialog({
             onClick={() => void handleSend()}
             disabled={sending || !draft.trim()}
           >
-            {sending ? '发送中…' : '发送'}
+            {sending ? '发送中...' : '发送'}
           </button>
         </div>
       </div>
