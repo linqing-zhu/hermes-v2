@@ -29,6 +29,7 @@ type ChatBlock =
       streaming?: boolean
       thinking?: string
       tools?: ToolCall[]
+      images?: string[]
     }
   | { kind: 'approval'; id: string; approvalId: string; action: string; context: string; agentName: string }
 

@@ -458,6 +458,9 @@ export async function setSkillEnabled(instanceId: HermesInstanceId, skillName: s
 type StreamChatOptions = {
   onEvent: (event: HermesStreamEvent) => void
   signal?: AbortSignal
+  /** Optional base64 data-URL images. Sent as an extra field; ignored by the
+   *  backend if it doesn't support vision (so text chat keeps working). */
+  images?: string[]
 }
 
 function parseSseBlock(block: string) {
@@ -500,7 +503,7 @@ export async function streamSessionChat(
 ) {
   const response = await nodeFetch(instanceId, `/api/sessions/${sessionId}/chat/stream`, {
     method: 'POST',
-    jsonBody: { message },
+    jsonBody: options.images?.length ? { message, images: options.images } : { message },
     accept: 'text/event-stream',
     signal: options.signal,
   })
