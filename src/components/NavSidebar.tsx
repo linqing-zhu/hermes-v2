@@ -365,7 +365,7 @@ export function NavSidebar({
   }
 
   const saveUsername = () => {
-    const name = draftName.trim() || '李君陌'
+    const name = draftName.trim() || '朱林情'
     setUsername(name)
     try {
       localStorage.setItem(USERNAME_KEY, name)
@@ -543,7 +543,7 @@ export function NavSidebar({
             <label className="settings__field">
               <span>用户名称</span>
               <div className="settings__row">
-                <input value={draftName} onChange={(e) => setDraftName(e.target.value)} placeholder="李君陌" />
+                <input value={draftName} onChange={(e) => setDraftName(e.target.value)} placeholder="朱林情" />
                 <button type="button" className="config-btn" onClick={saveUsername}>
                   保存
                 </button>
