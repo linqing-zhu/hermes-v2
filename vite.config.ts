@@ -1231,6 +1231,9 @@ function createSkillsBridgePlugin(): Plugin {
 export default defineConfig({
   plugins: [react(), createSkillsBridgePlugin()],
   server: {
+    host: '127.0.0.1',
+    port: 5173,
+    strictPort: true,
     proxy: {
       // Only the auto-detected local node uses a static proxy; remote nodes the
       // user adds at runtime route through /local-bridge/forward instead.

@@ -936,7 +936,6 @@ function App() {
       {skillGalleryOpen ? (
         <SkillGallery
           nodes={nodes.map((n) => ({ id: n.id, name: n.name, accent: n.accent }))}
-          onOpenChat={(instanceId) => openNodeChat(instanceId)}
           onClose={() => setSkillGalleryOpen(false)}
         />
       ) : null}
@@ -944,7 +943,6 @@ function App() {
       {jobListOpen ? (
         <JobList
           nodes={nodes.map((n) => ({ id: n.id, name: n.name, accent: n.accent }))}
-          onOpenChat={(instanceId) => openNodeChat(instanceId)}
           onClose={() => setJobListOpen(false)}
         />
       ) : null}

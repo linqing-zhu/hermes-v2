@@ -473,10 +473,79 @@
   color: #21293a;
 }
 
+.knowledge-panel__toolbar .knowledge-panel__name-input {
+  flex: 0 0 180px;
+}
+
 .knowledge-panel__refresh {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.knowledge-roots {
+  display: flex;
+  gap: 8px;
+  padding: 0 18px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(98, 104, 122, 0.1);
+  background: #fff;
+}
+
+.knowledge-root {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 7px;
+  max-width: 320px;
+  padding: 5px 7px 5px 10px;
+  border: 1px solid rgba(98, 104, 122, 0.14);
+  border-radius: 999px;
+  background: #f7f8fb;
+  color: #5b6374;
+  font: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.knowledge-root.is-active {
+  border-color: rgba(78, 139, 255, 0.42);
+  background: rgba(78, 139, 255, 0.1);
+  color: #2563eb;
+}
+
+.knowledge-root strong,
+.knowledge-root span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-root strong {
+  font-size: 0.74rem;
+}
+
+.knowledge-root span {
+  grid-column: 1;
+  color: #98a1b3;
+  font-size: 0.66rem;
+}
+
+.knowledge-root i {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  color: #8a93a6;
+  font-style: normal;
+}
+
+.knowledge-root i:hover {
+  color: #e0392b;
+  background: rgba(224, 57, 43, 0.1);
 }
 
 .knowledge-panel__error,
@@ -519,6 +588,43 @@
   overflow-y: auto;
   border-right: 1px solid rgba(98, 104, 122, 0.12);
   background: #fff;
+}
+
+.knowledge-library {
+  margin-bottom: 6px;
+}
+
+.knowledge-library__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #344054;
+  text-align: left;
+  cursor: pointer;
+}
+
+.knowledge-library__head:hover,
+.knowledge-library__head.is-active {
+  background: rgba(78, 139, 255, 0.1);
+}
+
+.knowledge-library__head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.84rem;
+}
+
+.knowledge-library__hint {
+  padding: 7px 10px 9px 31px;
+  color: #98a1b3;
+  font-size: 0.72rem;
 }
 
 .knowledge-tree__folder,

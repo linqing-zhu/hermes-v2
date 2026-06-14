@@ -7,11 +7,9 @@ type SkillWithState = HermesSkillWithInstance & { enabled: boolean; toggling: bo
 
 export function SkillGallery({
   nodes,
-  onOpenChat,
   onClose,
 }: {
   nodes: { id: HermesInstanceId; name: string; accent: string }[]
-  onOpenChat: (instanceId: HermesInstanceId) => void
   onClose: () => void
 }) {
   const [activeNode, setActiveNode] = useState<string>(nodes[0]?.id ?? '')
@@ -97,9 +95,6 @@ export function SkillGallery({
           <h2>技能广场</h2>
           <p>浏览和启用/禁用各 Hermes 节点的技能</p>
           <div className="dialog-header-actions">
-            <button type="button" className="dialog-chat-btn" onClick={() => onOpenChat(activeNode)} title="打开对话">
-              💬
-            </button>
             <button type="button" className="panel-sheet__close" onClick={onClose}>
               ×
             </button>

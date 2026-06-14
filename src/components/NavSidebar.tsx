@@ -14,6 +14,8 @@ import {
   Puzzle,
   FileText,
   RefreshCw,
+  Plus,
+  Trash2,
   Search,
   Settings,
   ChevronRight,
@@ -29,6 +31,13 @@ const ICON_SIZE = 16
 
 const USERNAME_KEY = 'cyber:username'
 const OBSIDIAN_ROOT_KEY = 'cyber:obsidian-root'
+const DOC_ROOTS_KEY = 'cyber:doc-roots'
+
+type DocRoot = {
+  id: string
+  name: string
+  path: string
+}
 
 function loadUsername() {
   try {
@@ -91,9 +100,68 @@ function PromptCard({ label, text }: { label: string; text: string }) {
 
 function loadObsidianRoot() {
   try {
-    return localStorage.getItem(OBSIDIAN_ROOT_KEY) || ''
+    return loadDocRoots()[0]?.path || ''
   } catch {
     return ''
+  }
+}
+
+function loadDocRoots() {
+  try {
+    const raw = localStorage.getItem(DOC_ROOTS_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item): DocRoot | null => {
+          if (typeof item === 'string' && item.trim()) return makeDocRoot(item.trim())
+          if (item && typeof item === 'object') {
+            const record = item as Record<string, unknown>
+            const pathValue = typeof record.path === 'string' ? record.path.trim() : ''
+            if (!pathValue) return null
+            const nameValue = typeof record.name === 'string' ? record.name.trim() : ''
+            const idValue = typeof record.id === 'string' ? record.id.trim() : ''
+            return makeDocRoot(pathValue, nameValue, idValue)
+          }
+          return null
+        })
+        .filter((item): item is DocRoot => Boolean(item))
+    }
+    const legacy = localStorage.getItem(OBSIDIAN_ROOT_KEY)
+    return legacy?.trim() ? [makeDocRoot(legacy.trim())] : []
+  } catch {
+    return []
+  }
+}
+
+function defaultDocRootName(pathValue: string) {
+  const normalized = pathValue.replace(/[\\/]+$/, '')
+  const tail = normalized.split(/[\\/]/).filter(Boolean).pop()
+  return tail || normalized || '文档库'
+}
+
+function makeDocRoot(pathValue: string, name?: string, id?: string): DocRoot {
+  const cleanPath = pathValue.trim()
+  return {
+    id: id || `doc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name: name?.trim() || defaultDocRootName(cleanPath),
+    path: cleanPath,
+  }
+}
+
+function saveDocRoots(roots: DocRoot[]) {
+  try {
+    const seen = new Set<string>()
+    const unique = roots.filter((item) => {
+      const key = item.path.trim().toLowerCase()
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    localStorage.setItem(DOC_ROOTS_KEY, JSON.stringify(unique))
+    if (unique[0]) localStorage.setItem(OBSIDIAN_ROOT_KEY, unique[0].path)
+    else localStorage.removeItem(OBSIDIAN_ROOT_KEY)
+  } catch {
+    // ignore
   }
 }
 
@@ -140,7 +208,9 @@ function buildNoteTree(notes: ObsidianNoteItem[]): ObsidianTreeNode[] {
 }
 
 function ObsidianPanel({ onClose }: { onClose: () => void }) {
+  const [docRoots, setDocRoots] = useState(loadDocRoots)
   const [root, setRoot] = useState(loadObsidianRoot)
+  const [rootName, setRootName] = useState('')
   const [notes, setNotes] = useState<ObsidianNoteItem[]>([])
   const [selectedPath, setSelectedPath] = useState('')
   const [activeNote, setActiveNote] = useState<ObsidianNoteContent | null>(null)
@@ -149,8 +219,70 @@ function ObsidianPanel({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('')
   const [truncated, setTruncated] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expandedRoots, setExpandedRoots] = useState<Set<string>>(() => new Set(loadDocRoots().map((item) => item.id)))
 
   const tree = useMemo(() => buildNoteTree(notes), [notes])
+  const persistDocRoots = (roots: DocRoot[]) => {
+    const seen = new Set<string>()
+    const unique = roots.filter((item) => {
+      const key = item.path.trim().toLowerCase()
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    setDocRoots(unique)
+    saveDocRoots(unique)
+  }
+  const addCurrentRoot = () => {
+    const trimmed = root.trim()
+    if (!trimmed) {
+      setError('先输入要添加的文档目录')
+      return
+    }
+    const existing = docRoots.find((item) => item.path.toLowerCase() === trimmed.toLowerCase())
+    const nextRoot = existing
+      ? { ...existing, name: rootName.trim() || existing.name }
+      : makeDocRoot(trimmed, rootName.trim())
+    persistDocRoots([nextRoot, ...docRoots.filter((item) => item.id !== nextRoot.id)])
+    setRoot(nextRoot.path)
+    setRootName('')
+    setExpandedRoots((cur) => new Set(cur).add(nextRoot.id))
+    setError('')
+  }
+  const removeDocRoot = (target: DocRoot) => {
+    const next = docRoots.filter((item) => item.id !== target.id)
+    persistDocRoots(next)
+    setExpandedRoots((cur) => {
+      const copy = new Set(cur)
+      copy.delete(target.id)
+      return copy
+    })
+    if (root === target.path) {
+      const fallback = next[0]?.path || ''
+      setRoot(fallback)
+      setNotes([])
+      setSelectedPath('')
+      setActiveNote(null)
+      setTruncated(false)
+    }
+  }
+  const selectDocRoot = (target: DocRoot) => {
+    setRoot(target.path)
+    setRootName(target.name)
+    setNotes([])
+    setSelectedPath('')
+    setActiveNote(null)
+    setTruncated(false)
+    setExpandedRoots((cur) => new Set(cur).add(target.id))
+  }
+  const toggleDocRoot = (id: string) => {
+    setExpandedRoots((cur) => {
+      const next = new Set(cur)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
   const toggleFolder = (path: string) =>
     setExpanded((cur) => {
       const next = new Set(cur)
@@ -168,7 +300,10 @@ function ObsidianPanel({ onClose }: { onClose: () => void }) {
     setLoading(true)
     setError('')
     try {
-      localStorage.setItem(OBSIDIAN_ROOT_KEY, trimmed)
+      const existing = docRoots.find((item) => item.path.toLowerCase() === trimmed.toLowerCase())
+      const currentRoot = existing ?? makeDocRoot(trimmed, rootName.trim())
+      persistDocRoots([currentRoot, ...docRoots.filter((item) => item.id !== currentRoot.id)])
+      setExpandedRoots((cur) => new Set(cur).add(currentRoot.id))
       const data = await getObsidianNotes(trimmed)
       setRoot(data.root)
       setNotes(data.notes)
@@ -267,26 +402,100 @@ function ObsidianPanel({ onClose }: { onClose: () => void }) {
 
         <div className="knowledge-panel__toolbar">
           <input
+            className="knowledge-panel__name-input"
+            value={rootName}
+            onChange={(e) => setRootName(e.target.value)}
+            placeholder="知识库名称"
+          />
+          <input
             value={root}
             onChange={(e) => setRoot(e.target.value)}
             placeholder="例如 C:\Users\你\Documents\Obsidian\我的库"
           />
+          <button type="button" className="config-btn config-btn--ghost knowledge-panel__refresh" onClick={addCurrentRoot}>
+            <Plus size={14} />
+            添加目录
+          </button>
           <button type="button" className="config-btn knowledge-panel__refresh" onClick={() => void refresh()} disabled={loading}>
             <RefreshCw size={14} />
             {loading ? '刷新中' : '刷新'}
           </button>
         </div>
 
+        {docRoots.length ? (
+          <div className="knowledge-roots">
+            {docRoots.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`knowledge-root ${item.path === root ? 'is-active' : ''}`}
+                onClick={() => selectDocRoot(item)}
+                title={item.path}
+              >
+                <strong>{item.name}</strong>
+                <span>{item.path}</span>
+                <i
+                  role="button"
+                  tabIndex={0}
+                  aria-label="删除目录"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    removeDocRoot(item)
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      removeDocRoot(item)
+                    }
+                  }}
+                >
+                  <Trash2 size={12} />
+                </i>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {error ? <p className="knowledge-panel__error">{error}</p> : null}
         {truncated ? <p className="knowledge-panel__notice">笔记较多，已显示最近 300 条。</p> : null}
 
         <div className="knowledge-panel__workspace">
           <aside className="knowledge-tree">
-            {notes.length ? (
-              renderNodes(tree, 0)
+            {docRoots.length ? (
+              docRoots.map((docRoot) => {
+                const isSelected = docRoot.path === root
+                const isOpen = expandedRoots.has(docRoot.id)
+                return (
+                  <div key={docRoot.id} className="knowledge-library">
+                    <button
+                      type="button"
+                      className={`knowledge-library__head ${isSelected ? 'is-active' : ''}`}
+                      onClick={() => {
+                        if (!isSelected) selectDocRoot(docRoot)
+                        else toggleDocRoot(docRoot.id)
+                      }}
+                      title={docRoot.path}
+                    >
+                      <ChevronRight size={14} className={`knowledge-tree__chevron ${isOpen ? 'is-open' : ''}`} />
+                      <Folder size={14} className="knowledge-tree__icon" />
+                      <strong>{docRoot.name}</strong>
+                    </button>
+                    {isOpen ? (
+                      isSelected && notes.length ? (
+                        renderNodes(tree, 1)
+                      ) : (
+                        <div className="knowledge-library__hint">
+                          {isSelected && loading ? '正在读取...' : '点击刷新读取笔记'}
+                        </div>
+                      )
+                    ) : null}
+                  </div>
+                )
+              })
             ) : (
               <div className="knowledge-panel__empty">
-                {loading ? '正在读取笔记...' : '输入 Obsidian 目录后点击刷新。'}
+                输入名称和目录后点击添加目录。
               </div>
             )}
           </aside>
