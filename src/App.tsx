@@ -175,6 +175,7 @@ function cardTimestamp(id: string): number {
 function App() {
   const [dashboard, setDashboard] = useState<HermesDashboardData | null>(null)
   const inFlight = useRef(false)
+  const [pageActive, setPageActive] = useState(() => document.visibilityState === 'visible' && document.hasFocus())
 
   // Dynamic node list: auto-detected local node + user-added remote nodes.
   const [localNode, setLocalNode] = useState<HermesNode | null>(null)
@@ -272,6 +273,23 @@ function App() {
     return () => { cancelled = true }
   }, [])
 
+  useEffect(() => {
+    const updatePageActive = () => {
+      setPageActive(document.visibilityState === 'visible' && document.hasFocus())
+    }
+    updatePageActive()
+    document.addEventListener('visibilitychange', updatePageActive)
+    window.addEventListener('focus', updatePageActive)
+    window.addEventListener('blur', updatePageActive)
+    window.addEventListener('pageshow', updatePageActive)
+    return () => {
+      document.removeEventListener('visibilitychange', updatePageActive)
+      window.removeEventListener('focus', updatePageActive)
+      window.removeEventListener('blur', updatePageActive)
+      window.removeEventListener('pageshow', updatePageActive)
+    }
+  }, [])
+
   const loadDashboard = useCallback(async (ids: HermesInstanceId[]) => {
     if (inFlight.current || ids.length === 0) return
     inFlight.current = true
@@ -286,10 +304,11 @@ function App() {
 
   useEffect(() => {
     const ids = nodes.map((n) => n.id)
+    if (!pageActive || ids.length === 0) return
     void loadDashboard(ids)
     const id = window.setInterval(() => void loadDashboard(ids), 5000)
     return () => window.clearInterval(id)
-  }, [loadDashboard, nodes])
+  }, [loadDashboard, nodes, pageActive])
 
   useEffect(() => {
     if (nodes.length === 0) return
@@ -359,10 +378,11 @@ function App() {
   }, [nodes])
 
   useEffect(() => {
+    if (!pageActive || nodes.length === 0) return
     void refreshRealTasks()
     const id = window.setInterval(() => void refreshRealTasks(), 8000)
     return () => window.clearInterval(id)
-  }, [refreshRealTasks])
+  }, [refreshRealTasks, pageActive, nodes.length])
 
   // Sidebar action handler
   const handleSidebarAction = useCallback(
